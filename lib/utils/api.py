@@ -31,6 +31,7 @@ from lib.core.data import logger
 from lib.core.datatype import AttribDict
 from lib.core.defaults import _defaults
 from lib.core.enums import CONTENT_STATUS
+from lib.core.enums import MKSTEMP_PREFIX
 from lib.core.enums import PART_RUN_CONTENT_TYPES
 from lib.core.exception import SqlmapConnectionException
 from lib.core.log import LOGGER_HANDLER
@@ -223,7 +224,7 @@ class StdDbOut(object):
                     # Ignore all non-relevant messages
                     return
 
-            output = conf.database_cursor.execute(
+            output = conf.databaseCursor.execute(
                 "SELECT id, status, value FROM data WHERE taskid = ? AND content_type = ?",
                 (self.taskid, content_type))
 
@@ -231,25 +232,25 @@ class StdDbOut(object):
             if status == CONTENT_STATUS.COMPLETE:
                 if len(output) > 0:
                     for index in xrange(len(output)):
-                        conf.database_cursor.execute("DELETE FROM data WHERE id = ?",
+                        conf.databaseCursor.execute("DELETE FROM data WHERE id = ?",
                                                      (output[index][0],))
 
-                conf.database_cursor.execute("INSERT INTO data VALUES(NULL, ?, ?, ?, ?)",
+                conf.databaseCursor.execute("INSERT INTO data VALUES(NULL, ?, ?, ?, ?)",
                                              (self.taskid, status, content_type, jsonize(value)))
                 if kb.partRun:
                     kb.partRun = None
 
             elif status == CONTENT_STATUS.IN_PROGRESS:
                 if len(output) == 0:
-                    conf.database_cursor.execute("INSERT INTO data VALUES(NULL, ?, ?, ?, ?)",
+                    conf.databaseCursor.execute("INSERT INTO data VALUES(NULL, ?, ?, ?, ?)",
                                                  (self.taskid, status, content_type,
                                                   jsonize(value)))
                 else:
                     new_value = "%s%s" % (dejsonize(output[0][2]), value)
-                    conf.database_cursor.execute("UPDATE data SET value = ? WHERE id = ?",
+                    conf.databaseCursor.execute("UPDATE data SET value = ? WHERE id = ?",
                                                  (jsonize(new_value), output[0][0]))
         else:
-            conf.database_cursor.execute("INSERT INTO errors VALUES(NULL, ?, ?)",
+            conf.databaseCursor.execute("INSERT INTO errors VALUES(NULL, ?, ?)",
                                          (self.taskid, str(value) if value else ""))
 
     def flush(self):
@@ -268,7 +269,7 @@ class LogRecorder(logging.StreamHandler):
         Record emitted events to IPC database for asynchronous I/O
         communication with the parent process
         """
-        conf.database_cursor.execute("INSERT INTO logs VALUES(NULL, ?, ?, ?, ?)",
+        conf.databaseCursor.execute("INSERT INTO logs VALUES(NULL, ?, ?, ?, ?)",
                                      (conf.taskid, time.strftime("%X"), record.levelname,
                                       record.msg % record.args if record.args else record.msg))
 
@@ -276,8 +277,8 @@ class LogRecorder(logging.StreamHandler):
 def setRestAPILog():
     if hasattr(conf, "api"):
         try:
-            conf.database_cursor = Database(conf.database)
-            conf.database_cursor.connect("client")
+            conf.databaseCursor = Database(conf.database)
+            conf.databaseCursor.connect("client")
         except sqlite3.OperationalError, ex:
             raise SqlmapConnectionException, "%s ('%s')" % (ex, conf.database)
 
@@ -643,7 +644,7 @@ def server(host=RESTAPI_DEFAULT_ADDRESS, port=RESTAPI_DEFAULT_PORT, adapter=REST
     REST-JSON API server
     """
     DataStore.admin_id = hexencode(os.urandom(16))
-    Database.filepath = tempfile.mkstemp(prefix="sqlmapipc-", text=False)[1]
+    Database.filepath = tempfile.mkstemp(prefix=MKSTEMP_PREFIX.IPC, text=False)[1]
 
     logger.info("Running REST-JSON API server at '%s:%d'.." % (host, port))
     logger.info("Admin ID: %s" % DataStore.admin_id)
@@ -721,7 +722,8 @@ def client(host=RESTAPI_DEFAULT_ADDRESS, port=RESTAPI_DEFAULT_PORT):
 
     while True:
         try:
-            command = raw_input("api%s> " % (" (%s)" % taskid if taskid else "")).strip().lower()
+            command = raw_input("api%s> " % (" (%s)" % taskid if taskid else "")).strip()
+            command = re.sub(r"\A(\w+)", lambda match: match.group(1).lower(), command)
         except (EOFError, KeyboardInterrupt):
             print
             break

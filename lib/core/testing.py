@@ -25,6 +25,7 @@ from lib.core.common import readXmlFile
 from lib.core.data import conf
 from lib.core.data import logger
 from lib.core.data import paths
+from lib.core.enums import MKSTEMP_PREFIX
 from lib.core.exception import SqlmapBaseException
 from lib.core.exception import SqlmapNotVulnerableException
 from lib.core.log import LOGGER_HANDLER
@@ -52,16 +53,17 @@ def smokeTest():
         if any(_ in root for _ in ("thirdparty", "extra")):
             continue
 
-        for ifile in files:
-            length += 1
+        for filename in files:
+            if os.path.splitext(filename)[1].lower() == ".py" and filename != "__init__.py":
+                length += 1
 
     for root, _, files in os.walk(paths.SQLMAP_ROOT_PATH):
         if any(_ in root for _ in ("thirdparty", "extra")):
             continue
 
-        for ifile in files:
-            if os.path.splitext(ifile)[1].lower() == ".py" and ifile != "__init__.py":
-                path = os.path.join(root, os.path.splitext(ifile)[0])
+        for filename in files:
+            if os.path.splitext(filename)[1].lower() == ".py" and filename != "__init__.py":
+                path = os.path.join(root, os.path.splitext(filename)[0])
                 path = path.replace(paths.SQLMAP_ROOT_PATH, '.')
                 path = path.replace(os.sep, '.').lstrip('.')
                 try:
@@ -70,7 +72,7 @@ def smokeTest():
                 except Exception, msg:
                     retVal = False
                     dataToStdout("\r")
-                    errMsg = "smoke test failed at importing module '%s' (%s):\n%s" % (path, os.path.join(root, ifile), msg)
+                    errMsg = "smoke test failed at importing module '%s' (%s):\n%s" % (path, os.path.join(root, filename), msg)
                     logger.error(errMsg)
                 else:
                     # Run doc tests
@@ -79,9 +81,9 @@ def smokeTest():
                     if failure_count > 0:
                         retVal = False
 
-            count += 1
-            status = '%d/%d (%d%%) ' % (count, length, round(100.0 * count / length))
-            dataToStdout("\r[%s] [INFO] complete: %s" % (time.strftime("%X"), status))
+                count += 1
+                status = '%d/%d (%d%%) ' % (count, length, round(100.0 * count / length))
+                dataToStdout("\r[%s] [INFO] complete: %s" % (time.strftime("%X"), status))
 
     clearConsoleLine()
     if retVal:
@@ -235,7 +237,7 @@ def initCase(switches, count):
     Failures.failedParseOn = None
     Failures.failedTraceBack = None
 
-    paths.SQLMAP_OUTPUT_PATH = tempfile.mkdtemp(prefix="sqlmaptest-%d-" % count)
+    paths.SQLMAP_OUTPUT_PATH = tempfile.mkdtemp(prefix="%s%d-" % (MKSTEMP_PREFIX.TESTING, count))
     paths.SQLMAP_DUMP_PATH = os.path.join(paths.SQLMAP_OUTPUT_PATH, "%s", "dump")
     paths.SQLMAP_FILES_PATH = os.path.join(paths.SQLMAP_OUTPUT_PATH, "%s", "files")
 

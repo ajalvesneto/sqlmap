@@ -9,6 +9,7 @@ import cgi
 import hashlib
 import os
 import re
+import shutil
 import tempfile
 import threading
 
@@ -118,8 +119,14 @@ class Dump(object):
         elif data is not None:
             _ = getUnicode(data)
 
-            if _ and _[-1] == '\n':
+            if _.endswith("\r\n"):
+                _ = _[:-2]
+
+            elif _.endswith("\n"):
                 _ = _[:-1]
+
+            if _.strip(' '):
+                _ = _.strip(' ')
 
             if "\n" in _:
                 self._write("%s:\n---\n%s\n---" % (header, _))
@@ -449,8 +456,23 @@ class Dump(object):
                         dumpFileName = os.path.join(dumpDbPath, "%s-%s.%s" % (_, hashlib.md5(unicodeencode(table)).hexdigest()[:8], conf.dumpFormat.lower()))
                     else:
                         dumpFileName = os.path.join(dumpDbPath, "%s.%s" % (_, conf.dumpFormat.lower()))
+            else:
+                appendToFile = any((conf.limitStart, conf.limitStop))
 
-            appendToFile = any((conf.limitStart, conf.limitStop)) and checkFile(dumpFileName, False)
+                if not appendToFile:
+                    count = 1
+                    while True:
+                        candidate = "%s.%d" % (dumpFileName, count)
+                        if not checkFile(candidate, False):
+                            try:
+                                shutil.copyfile(dumpFileName, candidate)
+                            except IOError:
+                                pass
+                            finally:
+                                break
+                        else:
+                            count += 1
+
             dumpFP = openFile(dumpFileName, "wb" if not appendToFile else "ab", buffering=DUMP_FILE_BUFFER_SIZE)
 
         count = int(tableValues["__infos__"]["count"])

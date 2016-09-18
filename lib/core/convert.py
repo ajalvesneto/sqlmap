@@ -11,7 +11,6 @@ import pickle
 import re
 import StringIO
 import sys
-import types
 
 from lib.core.settings import IS_WIN
 from lib.core.settings import UNICODE_ENCODING
@@ -161,7 +160,7 @@ def htmlunescape(value):
         codes = (('&lt;', '<'), ('&gt;', '>'), ('&quot;', '"'), ('&nbsp;', ' '), ('&amp;', '&'))
         retVal = reduce(lambda x, y: x.replace(y[0], y[1]), codes, retVal)
         try:
-            retVal = re.sub(r"&#x([^;]+);", lambda match: unichr(int(match.group(1), 16)), retVal)
+            retVal = re.sub(r"&#x([^ ;]+);", lambda match: unichr(int(match.group(1), 16)), retVal)
         except ValueError:
             pass
     return retVal

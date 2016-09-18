@@ -120,6 +120,7 @@ from lib.core.settings import MAX_CONNECT_RETRIES
 from lib.core.settings import MAX_NUMBER_OF_THREADS
 from lib.core.settings import NULL
 from lib.core.settings import PARAMETER_SPLITTING_REGEX
+from lib.core.settings import PRECONNECT_CANDIDATE_TIMEOUT
 from lib.core.settings import PROBLEMATIC_CUSTOM_INJECTION_PATTERNS
 from lib.core.settings import SITE
 from lib.core.settings import SOCKET_PRE_CONNECT_QUEUE_SIZE
@@ -127,12 +128,14 @@ from lib.core.settings import SQLMAP_ENVIRONMENT_PREFIX
 from lib.core.settings import SUPPORTED_DBMS
 from lib.core.settings import SUPPORTED_OS
 from lib.core.settings import TIME_DELAY_CANDIDATES
+from lib.core.settings import UNICODE_ENCODING
 from lib.core.settings import UNION_CHAR_REGEX
 from lib.core.settings import UNKNOWN_DBMS_VERSION
 from lib.core.settings import URI_INJECTABLE_REGEX
 from lib.core.settings import VERSION_STRING
 from lib.core.settings import WEBSCARAB_SPLITTER
 from lib.core.threads import getCurrentThreadData
+from lib.core.threads import setDaemon
 from lib.core.update import update
 from lib.parse.configfile import configFileParser
 from lib.parse.payloads import loadBoundaries
@@ -151,8 +154,8 @@ from lib.utils.crawler import crawl
 from lib.utils.deps import checkDependencies
 from lib.utils.search import search
 from lib.utils.purge import purge
-from thirdparty.colorama.initialise import init as coloramainit
 from thirdparty.keepalive import keepalive
+from thirdparty.multipart import multipartpost
 from thirdparty.oset.pyoset import oset
 from thirdparty.socks import socks
 from xml.etree.ElementTree import ElementTree
@@ -163,6 +166,7 @@ keepAliveHandler = keepalive.HTTPHandler()
 proxyHandler = urllib2.ProxyHandler()
 redirectHandler = SmartRedirectHandler()
 rangeHandler = HTTPRangeHandler()
+multipartPostHandler = multipartpost.MultipartPostHandler()
 
 def _feedTargetsDict(reqFile, addedTargetUrls):
     """
@@ -385,7 +389,7 @@ def _loadQueries():
     try:
         tree.parse(paths.QUERIES_XML)
     except Exception, ex:
-        errMsg = "something seems to be wrong with "
+        errMsg = "something appears to be wrong with "
         errMsg += "the file '%s' ('%s'). Please make " % (paths.QUERIES_XML, getSafeExString(ex))
         errMsg += "sure that you haven't made any changes to it"
         raise SqlmapInstallationException, errMsg
@@ -879,32 +883,32 @@ def _setTamperingFunctions():
         resolve_priorities = False
         priorities = []
 
-        for tfile in re.split(PARAMETER_SPLITTING_REGEX, conf.tamper):
+        for script in re.split(PARAMETER_SPLITTING_REGEX, conf.tamper):
             found = False
 
-            tfile = tfile.strip()
+            script = script.strip().encode(sys.getfilesystemencoding() or UNICODE_ENCODING)
 
-            if not tfile:
+            if not script:
                 continue
 
-            elif os.path.exists(os.path.join(paths.SQLMAP_TAMPER_PATH, tfile if tfile.endswith('.py') else "%s.py" % tfile)):
-                tfile = os.path.join(paths.SQLMAP_TAMPER_PATH, tfile if tfile.endswith('.py') else "%s.py" % tfile)
+            elif os.path.exists(os.path.join(paths.SQLMAP_TAMPER_PATH, script if script.endswith(".py") else "%s.py" % script)):
+                script = os.path.join(paths.SQLMAP_TAMPER_PATH, script if script.endswith(".py") else "%s.py" % script)
 
-            elif not os.path.exists(tfile):
-                errMsg = "tamper script '%s' does not exist" % tfile
+            elif not os.path.exists(script):
+                errMsg = "tamper script '%s' does not exist" % script
                 raise SqlmapFilePathException(errMsg)
 
-            elif not tfile.endswith('.py'):
-                errMsg = "tamper script '%s' should have an extension '.py'" % tfile
+            elif not script.endswith(".py"):
+                errMsg = "tamper script '%s' should have an extension '.py'" % script
                 raise SqlmapSyntaxException(errMsg)
 
-            dirname, filename = os.path.split(tfile)
+            dirname, filename = os.path.split(script)
             dirname = os.path.abspath(dirname)
 
             infoMsg = "loading tamper script '%s'" % filename[:-3]
             logger.info(infoMsg)
 
-            if not os.path.exists(os.path.join(dirname, '__init__.py')):
+            if not os.path.exists(os.path.join(dirname, "__init__.py")):
                 errMsg = "make sure that there is an empty file '__init__.py' "
                 errMsg += "inside of tamper scripts directory '%s'" % dirname
                 raise SqlmapGenericException(errMsg)
@@ -913,11 +917,11 @@ def _setTamperingFunctions():
                 sys.path.insert(0, dirname)
 
             try:
-                module = __import__(filename[:-3].encode(sys.getfilesystemencoding()))
-            except (ImportError, SyntaxError), msg:
-                raise SqlmapSyntaxException("cannot import tamper script '%s' (%s)" % (filename[:-3], msg))
+                module = __import__(filename[:-3])
+            except (ImportError, SyntaxError), ex:
+                raise SqlmapSyntaxException("cannot import tamper script '%s' (%s)" % (filename[:-3], getSafeExString(ex)))
 
-            priority = PRIORITY.NORMAL if not hasattr(module, '__priority__') else module.__priority__
+            priority = PRIORITY.NORMAL if not hasattr(module, "__priority__") else module.__priority__
 
             for name, function in inspect.getmembers(module, inspect.isfunction):
                 if name == "tamper" and inspect.getargspec(function).args and inspect.getargspec(function).keywords == "kwargs":
@@ -926,7 +930,7 @@ def _setTamperingFunctions():
                     function.func_name = module.__name__
 
                     if check_priority and priority > last_priority:
-                        message = "it seems that you might have mixed "
+                        message = "it appears that you might have mixed "
                         message += "the order of tamper scripts. "
                         message += "Do you want to auto resolve this? [Y/n/q] "
                         test = readInput(message, default="Y")
@@ -949,7 +953,7 @@ def _setTamperingFunctions():
 
             if not found:
                 errMsg = "missing function 'tamper(payload, **kwargs)' "
-                errMsg += "in tamper script '%s'" % tfile
+                errMsg += "in tamper script '%s'" % script
                 raise SqlmapGenericException(errMsg)
 
         if kb.tamperFunctions and len(kb.tamperFunctions) > 3:
@@ -998,6 +1002,8 @@ def _setWafFunctions():
             else:
                 kb.wafFunctions.append((_["detect"], _.get("__product__", filename[:-3])))
 
+        kb.wafFunctions = sorted(kb.wafFunctions, key=lambda _: "generic" in _[1].lower())
+
 def _setThreads():
     if not isinstance(conf.threads, int) or conf.threads <= 0:
         conf.threads = 1
@@ -1008,12 +1014,12 @@ def _setDNSCache():
     """
 
     def _getaddrinfo(*args, **kwargs):
-        if args in kb.cache:
-            return kb.cache[args]
+        if args in kb.cache.addrinfo:
+            return kb.cache.addrinfo[args]
 
         else:
-            kb.cache[args] = socket._getaddrinfo(*args, **kwargs)
-            return kb.cache[args]
+            kb.cache.addrinfo[args] = socket._getaddrinfo(*args, **kwargs)
+            return kb.cache.addrinfo[args]
 
     if not hasattr(socket, "_getaddrinfo"):
         socket._getaddrinfo = socket.getaddrinfo
@@ -1036,7 +1042,7 @@ def _setSocketPreConnect():
                         s = socket.socket(family, type, proto)
                         s._connect(address)
                         with kb.locks.socket:
-                            socket._ready[key].append(s._sock)
+                            socket._ready[key].append((s._sock, time.time()))
             except KeyboardInterrupt:
                 break
             except:
@@ -1051,9 +1057,17 @@ def _setSocketPreConnect():
         with kb.locks.socket:
             if key not in socket._ready:
                 socket._ready[key] = []
-            if len(socket._ready[key]) > 0:
-                self._sock = socket._ready[key].pop(0)
-                found = True
+            while len(socket._ready[key]) > 0:
+                candidate, created = socket._ready[key].pop(0)
+                if (time.time() - created) < PRECONNECT_CANDIDATE_TIMEOUT:
+                    self._sock = candidate
+                    found = True
+                    break
+                else:
+                    try:
+                        candidate.close()
+                    except socket.error:
+                        pass
 
         if not found:
             self._connect(address)
@@ -1064,6 +1078,7 @@ def _setSocketPreConnect():
         socket.socket.connect = connect
 
         thread = threading.Thread(target=_)
+        setDaemon(thread)
         thread.start()
 
 def _setHTTPHandlers():
@@ -1151,7 +1166,7 @@ def _setHTTPHandlers():
     debugMsg = "creating HTTP requests opener object"
     logger.debug(debugMsg)
 
-    handlers = filter(None, [proxyHandler if proxyHandler.proxies else None, authHandler, redirectHandler, rangeHandler, httpsHandler])
+    handlers = filter(None, [multipartPostHandler, proxyHandler if proxyHandler.proxies else None, authHandler, redirectHandler, rangeHandler, httpsHandler])
 
     if not conf.dropSetCookie:
         if not conf.loadCookies:
@@ -1545,18 +1560,36 @@ def _createTemporaryDirectory():
     Creates temporary directory for this run.
     """
 
-    try:
-        if not os.path.isdir(tempfile.gettempdir()):
-            os.makedirs(tempfile.gettempdir())
-    except IOError, ex:
-        errMsg = "there has been a problem while accessing "
-        errMsg += "system's temporary directory location(s) ('%s'). Please " % getSafeExString(ex)
-        errMsg += "make sure that there is enough disk space left. If problem persists, "
-        errMsg += "try to set environment variable 'TEMP' to a location "
-        errMsg += "writeable by the current user"
-        raise SqlmapSystemException, errMsg
+    if conf.tmpDir:
+        try:
+            if not os.path.isdir(conf.tmpDir):
+                os.makedirs(conf.tmpDir)
 
-    if "sqlmap" not in (tempfile.tempdir or ""):
+            _ = os.path.join(conf.tmpDir, randomStr())
+            open(_, "w+b").close()
+            os.remove(_)
+
+            tempfile.tempdir = conf.tmpDir
+
+            warnMsg = "using '%s' as the temporary directory" % conf.tmpDir
+            logger.warn(warnMsg)
+        except (OSError, IOError), ex:
+            errMsg = "there has been a problem while accessing "
+            errMsg += "temporary directory location(s) ('%s')" % getSafeExString(ex)
+            raise SqlmapSystemException, errMsg
+    else:
+        try:
+            if not os.path.isdir(tempfile.gettempdir()):
+                os.makedirs(tempfile.gettempdir())
+        except IOError, ex:
+            errMsg = "there has been a problem while accessing "
+            errMsg += "system's temporary directory location(s) ('%s'). Please " % getSafeExString(ex)
+            errMsg += "make sure that there is enough disk space left. If problem persists, "
+            errMsg += "try to set environment variable 'TEMP' to a location "
+            errMsg += "writeable by the current user"
+            raise SqlmapSystemException, errMsg
+
+    if "sqlmap" not in (tempfile.tempdir or "") or conf.tmpDir and tempfile.tempdir == conf.tmpDir:
         tempfile.tempdir = tempfile.mkdtemp(prefix="sqlmap", suffix=str(os.getpid()))
 
     kb.tempDir = tempfile.tempdir
@@ -1589,6 +1622,9 @@ def _cleanupOptions():
         conf.testParameter = re.split(PARAMETER_SPLITTING_REGEX, conf.testParameter)
     else:
         conf.testParameter = []
+
+    if conf.agent:
+        conf.agent = re.sub(r"[\r\n]", "", conf.agent)
 
     if conf.user:
         conf.user = conf.user.replace(" ", "")
@@ -1654,9 +1690,19 @@ def _cleanupOptions():
         conf.testFilter = conf.testFilter.strip('*+')
         conf.testFilter = re.sub(r"([^.])([*+])", "\g<1>.\g<2>", conf.testFilter)
 
+        try:
+            re.compile(conf.testFilter)
+        except re.error:
+            conf.testFilter = re.escape(conf.testFilter)
+
     if conf.testSkip:
         conf.testSkip = conf.testSkip.strip('*+')
         conf.testSkip = re.sub(r"([^.])([*+])", "\g<1>.\g<2>", conf.testSkip)
+
+        try:
+            re.compile(conf.testSkip)
+        except re.error:
+            conf.testSkip = re.escape(conf.testSkip)
 
     if "timeSec" not in kb.explicitSettings:
         if conf.tor:
@@ -1687,7 +1733,7 @@ def _cleanupOptions():
 
     if conf.outputDir:
         paths.SQLMAP_OUTPUT_PATH = os.path.realpath(os.path.expanduser(conf.outputDir))
-        setPaths()
+        setPaths(paths.SQLMAP_ROOT_PATH)
 
     if conf.string:
         try:
@@ -1795,9 +1841,14 @@ def _setKnowledgeBaseAttributes(flushAll=True):
     kb.bruteMode = False
 
     kb.cache = AttribDict()
+    kb.cache.addrinfo = {}
     kb.cache.content = {}
+    kb.cache.encoding = {}
+    kb.cache.parsedDbms = {}
     kb.cache.regex = {}
     kb.cache.stdev = {}
+
+    kb.captchaDetected = None
 
     kb.chars = AttribDict()
     kb.chars.delimiter = randomStr(length=6, lowercase=True)
@@ -1807,6 +1858,7 @@ def _setKnowledgeBaseAttributes(flushAll=True):
 
     kb.columnExistsChoice = None
     kb.commonOutputs = None
+    kb.cookieEncodeChoice = None
     kb.counters = {}
     kb.data = AttribDict()
     kb.dataOutputFlag = False
@@ -1820,6 +1872,7 @@ def _setKnowledgeBaseAttributes(flushAll=True):
     kb.dnsMode = False
     kb.dnsTest = None
     kb.docRoot = None
+    kb.dumpColumns = None
     kb.dumpTable = None
     kb.dumpKeyboardInterrupt = False
     kb.dynamicMarkings = []
@@ -1829,6 +1882,7 @@ def _setKnowledgeBaseAttributes(flushAll=True):
     kb.extendTests = None
     kb.errorChunkLength = None
     kb.errorIsNone = True
+    kb.falsePositives = []
     kb.fileReadMode = False
     kb.followSitemapRecursion = None
     kb.forcedDbms = None
@@ -1838,6 +1892,7 @@ def _setKnowledgeBaseAttributes(flushAll=True):
     kb.headersFp = {}
     kb.heuristicDbms = None
     kb.heuristicMode = False
+    kb.heuristicPage = False
     kb.heuristicTest = None
     kb.hintValue = None
     kb.htmlFp = []
@@ -1896,13 +1951,16 @@ def _setKnowledgeBaseAttributes(flushAll=True):
     kb.reflectiveCounters = {REFLECTIVE_COUNTER.MISS: 0, REFLECTIVE_COUNTER.HIT: 0}
     kb.requestCounter = 0
     kb.resendPostOnRedirect = None
+    kb.resolutionDbms = None
     kb.responseTimes = {}
     kb.responseTimeMode = None
     kb.responseTimePayload = None
     kb.resumeValues = True
+    kb.rowXmlMode = False
     kb.safeCharEncode = False
     kb.safeReq = AttribDict()
     kb.singleLogFlags = set()
+    kb.skipSeqMatcher = False
     kb.reduceTests = None
     kb.tlsSNI = {}
     kb.stickyDBMS = False
@@ -1910,6 +1968,7 @@ def _setKnowledgeBaseAttributes(flushAll=True):
     kb.storeCrawlingChoice = None
     kb.storeHashesChoice = None
     kb.suppressResumeInfo = False
+    kb.tableFrom = None
     kb.technique = None
     kb.tempDir = None
     kb.testMode = False
@@ -2140,6 +2199,8 @@ def _mergeOptions(inputOptions, overrideOptions):
     if inputOptions.pickledOptions:
         try:
             inputOptions = base64unpickle(inputOptions.pickledOptions)
+            if type(inputOptions) == dict:
+                inputOptions = AttribDict(inputOptions)
             _normalizeOptions(inputOptions)
         except Exception, ex:
             errMsg = "provided invalid value '%s' for option '--pickled-options'" % inputOptions.pickledOptions
@@ -2237,6 +2298,7 @@ def _setTorHttpProxySettings():
     infoMsg = "setting Tor HTTP proxy settings"
     logger.info(infoMsg)
 
+    s = None
     found = None
 
     for port in (DEFAULT_TOR_HTTP_PORTS if not conf.torPort else (conf.torPort,)):
@@ -2248,12 +2310,13 @@ def _setTorHttpProxySettings():
         except socket.error:
             pass
 
-    s.close()
+    if s:
+        s.close()
 
     if found:
         conf.proxy = "http://%s:%d" % (LOCALHOST, found)
     else:
-        errMsg = "can't establish connection with the Tor proxy. "
+        errMsg = "can't establish connection with the Tor HTTP proxy. "
         errMsg += "Please make sure that you have Vidalia, Privoxy or "
         errMsg += "Polipo bundle installed for you to be able to "
         errMsg += "successfully use switch '--tor' "
@@ -2298,7 +2361,7 @@ def _checkTor():
         page = None
 
     if not page or 'Congratulations' not in page:
-        errMsg = "it seems that Tor is not properly set. Please try using options '--tor-type' and/or '--tor-port'"
+        errMsg = "it appears that Tor is not properly set. Please try using options '--tor-type' and/or '--tor-port'"
         raise SqlmapConnectionException(errMsg)
     else:
         infoMsg = "Tor is properly being used"
@@ -2530,11 +2593,9 @@ def _resolveCrossReferences():
     lib.request.connect.setHTTPHandlers = _setHTTPHandlers
     lib.utils.search.setHTTPHandlers = _setHTTPHandlers
     lib.controller.checks.setVerbosity = setVerbosity
+    lib.controller.checks.setWafFunctions = _setWafFunctions
 
 def initOptions(inputOptions=AttribDict(), overrideOptions=False):
-    if IS_WIN:
-        coloramainit()
-
     _setConfAttributes()
     _setKnowledgeBaseAttributes()
     _mergeOptions(inputOptions, overrideOptions)

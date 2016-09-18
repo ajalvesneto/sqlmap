@@ -10,7 +10,6 @@ import re
 import subprocess
 import string
 import sys
-import time
 import types
 
 from lib.core.datatype import AttribDict
@@ -20,10 +19,11 @@ from lib.core.enums import OS
 from lib.core.revision import getRevisionNumber
 
 # sqlmap version (<major>.<minor>.<month>.<monthly commit>)
-VERSION = "1.0.4.17"
+VERSION = "1.0.9.14"
 REVISION = getRevisionNumber()
-STABLE = VERSION.count('.') <= 2
-VERSION_STRING = "sqlmap/%s#%s" % (VERSION, "stable" if STABLE else "dev")
+TYPE = "dev" if VERSION.count('.') > 2 and VERSION.split('.')[-1] != '0' else "stable"
+TYPE_COLORS = {"dev": 33, "stable": 90, "pip": 34}
+VERSION_STRING = "sqlmap/%s#%s" % ('.'.join(VERSION.split('.')[:-1]) if VERSION.count('.') > 2 and VERSION.split('.')[-1] == '0' else VERSION, TYPE)
 DESCRIPTION = "automatic SQL injection and database takeover tool"
 SITE = "http://sqlmap.org"
 ISSUES_PAGE = "https://github.com/sqlmapproject/sqlmap/issues/new"
@@ -36,7 +36,7 @@ BANNER = """\033[01;33m         _
 |_ -| . | |     | .'| . |
 |___|_  |_|_|_|_|__,|  _|
       |_|           |_|   \033[0m\033[4;37m%s\033[0m\n
-""" % ((31 + hash(VERSION) % 6) if not STABLE else 30, VERSION_STRING.split('/')[-1], SITE)
+""" % (TYPE_COLORS.get(TYPE, 31), VERSION_STRING.split('/')[-1], SITE)
 
 # Minimum distance of ratio from kb.matchRatio to result in True
 DIFF_TOLERANCE = 0.05
@@ -61,6 +61,7 @@ PARTIAL_HEX_VALUE_MARKER = "__PARTIAL_HEX_VALUE__"
 URI_QUESTION_MARKER = "__QUESTION_MARK__"
 ASTERISK_MARKER = "__ASTERISK_MARK__"
 REPLACEMENT_MARKER = "__REPLACEMENT_MARK__"
+BOUNDED_INJECTION_MARKER = "__BOUNDED_INJECTION_MARK__"
 
 RANDOM_INTEGER_MARKER = "[RANDINT]"
 RANDOM_STRING_MARKER = "[RANDSTR]"
@@ -68,6 +69,9 @@ RANDOM_STRING_MARKER = "[RANDSTR]"
 PAYLOAD_DELIMITER = "__PAYLOAD_DELIMITER__"
 CHAR_INFERENCE_MARK = "%c"
 PRINTABLE_CHAR_REGEX = r"[^\x00-\x1f\x7f-\xff]"
+
+# Regular expression used for extraction of table names (useful for (e.g.) MsAccess)
+SELECT_FROM_TABLE_REGEX = r"\bSELECT .+? FROM (?P<result>([\w.]|`[^`<>]+`)+)"
 
 # Regular expression used for recognition of textual content-type
 TEXT_CONTENT_TYPE_REGEX = r"(?i)(text|form|message|xml|javascript|ecmascript|json)"
@@ -77,6 +81,9 @@ PERMISSION_DENIED_REGEX = r"(command|permission|access)\s*(was|is)?\s*denied"
 
 # Regular expression used for recognition of generic maximum connection messages
 MAX_CONNECTIONS_REGEX = r"max.+connections"
+
+# Timeout before the pre-connection candidate is being disposed (because of high probability that the web server will reset it)
+PRECONNECT_CANDIDATE_TIMEOUT = 10
 
 # Regular expression used for extracting results from Google search
 GOOGLE_REGEX = r"webcache\.googleusercontent\.com/search\?q=cache:[^:]+:([^+]+)\+&amp;cd=|url\?\w+=((?![^>]+webcache\.googleusercontent\.com)http[^>]+)&(sa=U|rct=j)"
@@ -129,6 +136,9 @@ HTTP_ACCEPT_ENCODING_HEADER_VALUE = "gzip,deflate"
 
 # Default timeout for running commands over backdoor
 BACKDOOR_RUN_CMD_TIMEOUT = 5
+
+# Number of seconds to wait for thread finalization at program end
+THREAD_FINALIZATION_TIMEOUT = 1
 
 # Maximum number of techniques used in inject.py/getValue() per one value
 MAX_TECHNIQUES_PER_VALUE = 2
@@ -281,12 +291,16 @@ BLANK = "<blank>"
 # String representation for current database
 CURRENT_DB = "CD"
 
+# Regular expressions used for finding file paths in error messages
+FILE_PATH_REGEXES = (r" in (file )?<b>(?P<result>.*?)</b> on line \d+", r"in (?P<result>[^<>]+?) on line \d+", r"(?:[>(\[\s])(?P<result>[A-Za-z]:[\\/][\w. \\/-]*)", r"(?:[>(\[\s])(?P<result>/\w[/\w.-]+)", r"href=['\"]file://(?P<result>/[^'\"]+)")
+
 # Regular expressions used for parsing error messages (--parse-errors)
 ERROR_PARSING_REGEXES = (
                           r"<b>[^<]*(fatal|error|warning|exception)[^<]*</b>:?\s*(?P<result>.+?)<br\s*/?\s*>",
-                          r"(?m)^(fatal|error|warning|exception):?\s*(?P<result>.+?)$",
+                          r"(?m)^(fatal|error|warning|exception):?\s*(?P<result>[^\n]+?)$",
                           r"<li>Error Type:<br>(?P<result>.+?)</li>",
                           r"error '[0-9a-f]{8}'((<[^>]+>)|\s)+(?P<result>[^<>]+)",
+                          r"(?m)^\s*\[[^\n]+(ODBC|JDBC)[^\n]+\](?P<result>[^\]]+in query expression[^\n]+)$"
                         )
 
 # Regular expression used for parsing charset info from meta html headers
@@ -312,9 +326,6 @@ BURP_REQUEST_REGEX = r"={10,}\s+[^=]+={10,}\s(.+?)\s={10,}"
 
 # Regex used for parsing XML Burp saved history items
 BURP_XML_HISTORY_REGEX = r'<port>(\d+)</port>.+?<request base64="true"><!\[CDATA\[([^]]+)'
-
-# Server header in CloudFlare responses
-CLOUDFLARE_SERVER_HEADER = "cloudflare-nginx"
 
 # Encoding used for Unicode data
 UNICODE_ENCODING = "utf8"
@@ -459,8 +470,8 @@ BRUTE_TABLE_EXISTS_TEMPLATE = "EXISTS(SELECT %d FROM %s)"
 # Template used for common column existence check
 BRUTE_COLUMN_EXISTS_TEMPLATE = "EXISTS(SELECT %s FROM %s)"
 
-# Payload used for checking of existence of IDS/WAF (dummier the better)
-IDS_WAF_CHECK_PAYLOAD = "AND 1=1 UNION ALL SELECT 1,2,3,table_name FROM information_schema.tables WHERE 2>1-- ../../../etc/passwd"
+# Payload used for checking of existence of IDS/IPS/WAF (dummier the better)
+IDS_WAF_CHECK_PAYLOAD = "AND 1=1 UNION ALL SELECT 1,NULL,'<script>alert(\"XSS\")</script>',table_name FROM information_schema.tables WHERE 2>1--/**/; EXEC xp_cmdshell('cat ../../../etc/passwd')#"
 
 # Data inside shellcodeexec to be filled with random string
 SHELLCODEEXEC_RANDOM_STRING_MARKER = "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
@@ -521,7 +532,7 @@ DEFAULT_COOKIE_DELIMITER = ';'
 FORCE_COOKIE_EXPIRATION_TIME = "9999999999"
 
 # Github OAuth token used for creating an automatic Issue for unhandled exceptions
-GITHUB_REPORT_OAUTH_TOKEN = "YzNkYTgyMTdjYzdjNjZjMjFjMWE5ODI5OGQyNzk2ODM1M2M0MzUyOA=="
+GITHUB_REPORT_OAUTH_TOKEN = "NTMyNWNkMmZkMzRlMDZmY2JkMmY0MGI4NWI0MzVlM2Q5YmFjYWNhYQ=="
 
 # Skip unforced HashDB flush requests below the threshold number of cached items
 HASHDB_FLUSH_THRESHOLD = 32
@@ -533,7 +544,7 @@ HASHDB_FLUSH_RETRIES = 3
 HASHDB_END_TRANSACTION_RETRIES = 3
 
 # Unique milestone value used for forced deprecation of old HashDB values (e.g. when changing hash/pickle mechanism)
-HASHDB_MILESTONE_VALUE = "WVMqopmuzX"  # "".join(random.sample(string.ascii_letters, 10))
+HASHDB_MILESTONE_VALUE = "baFJusZrel"  # python -c 'import random, string; print "".join(random.sample(string.ascii_letters, 10))'
 
 # Warn user of possible delay due to large page dump in full UNION query injections
 LARGE_OUTPUT_THRESHOLD = 1024 ** 2
@@ -562,6 +573,9 @@ HEURISTIC_CHECK_ALPHABET = ('"', '\'', ')', '(', ',', '.')
 # String used for dummy non-SQLi (e.g. XSS) heuristic checks of a tested parameter value
 DUMMY_NON_SQLI_CHECK_APPENDIX = "<'\">"
 
+# Regular expression used for recognition of file inclusion errors
+FI_ERROR_REGEX = "(?i)[^\n]*(no such file|failed (to )?open)[^\n]*"
+
 # Length of prefix and suffix used in non-SQLI heuristic checks
 NON_SQLI_CHECK_PREFIX_SUFFIX_LENGTH = 6
 
@@ -569,7 +583,10 @@ NON_SQLI_CHECK_PREFIX_SUFFIX_LENGTH = 6
 MAX_CONNECTION_CHUNK_SIZE = 10 * 1024 * 1024
 
 # Maximum response total page size (trimmed if larger)
-MAX_CONNECTION_TOTAL_SIZE = 100 * 1024 * 1024
+MAX_CONNECTION_TOTAL_SIZE = 50 * 1024 * 1024
+
+# For preventing MemoryError exceptions (caused when using large sequences in difflib.SequenceMatcher)
+MAX_DIFFLIB_SEQUENCE_LENGTH = 10 * 1024 * 1024
 
 # Maximum (multi-threaded) length of entry in bisection algorithm
 MAX_BISECTION_LENGTH = 50 * 1024 * 1024
@@ -587,7 +604,7 @@ VALID_TIME_CHARS_RUN_THRESHOLD = 100
 CHECK_ZERO_COLUMNS_THRESHOLD = 10
 
 # Boldify all logger messages containing these "patterns"
-BOLD_PATTERNS = ("' injectable", "provided empty", "leftover chars", "might be injectable", "' is vulnerable", "is not injectable", "test failed", "test passed", "live test final result", "test shows that", "the back-end DBMS is", "created Github", "blocked by the target server", "protection is involved", "CloudFlare")
+BOLD_PATTERNS = ("' injectable", "provided empty", "leftover chars", "might be injectable", "' is vulnerable", "is not injectable", "test failed", "test passed", "live test final result", "test shows that", "the back-end DBMS is", "created Github", "blocked by the target server", "protection is involved", "CAPTCHA")
 
 # Generic www root directory names
 GENERIC_DOC_ROOT_DIRECTORY_NAMES = ("htdocs", "httpdocs", "public", "wwwroot", "www")
@@ -599,7 +616,7 @@ MAX_HELP_OPTION_LENGTH = 18
 MAX_CONNECT_RETRIES = 100
 
 # Strings for detecting formatting errors
-FORMAT_EXCEPTION_STRINGS = ("Type mismatch", "Error converting", "Failed to convert", "System.FormatException", "java.lang.NumberFormatException", "ValueError: invalid literal")
+FORMAT_EXCEPTION_STRINGS = ("Type mismatch", "Error converting", "Conversion failed", "String or binary data would be truncated", "Failed to convert", "unable to interpret text value", "Input string was not in a correct format", "System.FormatException", "java.lang.NumberFormatException", "ValueError: invalid literal", "DataTypeMismatchException", "CF_SQL_INTEGER", " for CFSQLTYPE ", "cfqueryparam cfsqltype", "InvalidParamTypeException", "Invalid parameter type", "is not of type numeric", "<cfif Not IsNumeric(", "invalid input syntax for integer", "invalid input syntax for type", "invalid number", "character to number conversion error", "unable to interpret text value", "String was not recognized as a valid", "Convert.ToInt", "cannot be converted to a ", "InvalidDataException")
 
 # Regular expression used for extracting ASP.NET view state values
 VIEWSTATE_REGEX = r'(?i)(?P<name>__VIEWSTATE[^"]*)[^>]+value="(?P<result>[^"]+)'
@@ -649,6 +666,9 @@ SUHOSIN_MAX_VALUE_LENGTH = 512
 # Minimum size of an (binary) entry before it can be considered for dumping to disk
 MIN_BINARY_DISK_DUMP_SIZE = 100
 
+# Filenames of payloads xml files (in order of loading)
+PAYLOAD_XML_FILES = ("boolean_blind.xml", "error_based.xml", "inline_query.xml", "stacked_queries.xml", "time_blind.xml", "union_query.xml")
+
 # Regular expression used for extracting form tags
 FORM_SEARCH_REGEX = r"(?si)<form(?!.+<form).+?</form>"
 
@@ -680,7 +700,7 @@ BRUTE_DOC_ROOT_PREFIXES = {
 }
 
 # Suffixes used in brute force search for web server document root
-BRUTE_DOC_ROOT_SUFFIXES = ("", "html", "htdocs", "httpdocs", "php", "public", "src", "site", "build", "web", "data", "sites/all", "www/build")
+BRUTE_DOC_ROOT_SUFFIXES = ("", "html", "htdocs", "httpdocs", "php", "public", "src", "site", "build", "web", "www", "data", "sites/all", "www/build")
 
 # String used for marking target name inside used brute force web server document root
 BRUTE_DOC_ROOT_TARGET_MARK = "%TARGET%"
